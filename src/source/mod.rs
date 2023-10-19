@@ -22,6 +22,7 @@ pub use self::mix::Mix;
 pub use self::pausable::Pausable;
 pub use self::periodic::PeriodicAccess;
 pub use self::repeat::Repeat;
+use self::repeatable::Repeatable;
 pub use self::samples_converter::SamplesConverter;
 pub use self::sine::SineWave;
 pub use self::skip::SkipDuration;
@@ -49,6 +50,7 @@ mod mix;
 mod pausable;
 mod periodic;
 mod repeat;
+mod repeatable;
 mod samples_converter;
 mod sine;
 mod skip;
@@ -330,6 +332,13 @@ where
         Self: Sized,
     {
         skippable::skippable(self)
+    }
+
+    fn repeatable(self) -> Repeatable<Self> 
+    where
+        Self: Sized
+    {
+        repeatable::repeatable(self)
     }
 
     /// Applies a low-pass filter to the source.

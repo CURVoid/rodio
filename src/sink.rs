@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +30,7 @@ struct Controls {
     pause: AtomicBool,
     volume: Mutex<f32>,
     stopped: AtomicBool,
+    repeat_current: AtomicBool,
     speed: Mutex<f32>,
     to_clear: Mutex<u32>,
 }
@@ -42,10 +44,40 @@ impl Sink {
         Ok(sink)
     }
 
+    /// Builds a new `Sink`, beginning playback on a stream, with signal sender.
+    #[inline]
+    pub fn try_new_with_signal(stream: &OutputStreamHandle, signal_sender: Sender<Box<dyn Source<Item = f32> + Send>>) -> Result<Sink, PlayError> {
+        let (sink, queue_rx) = Sink::new_idle_with_signal(signal_sender);
+        stream.play_raw(queue_rx)?;
+        Ok(sink)
+    }
+
     /// Builds a new `Sink`.
     #[inline]
     pub fn new_idle() -> (Sink, queue::SourcesQueueOutput<f32>) {
         let (queue_tx, queue_rx) = queue::queue(true);
+        
+        let sink = Sink {
+            queue_tx,
+            sleep_until_end: Mutex::new(None),
+            controls: Arc::new(Controls {
+                pause: AtomicBool::new(false),
+                volume: Mutex::new(1.0),
+                stopped: AtomicBool::new(false),
+                repeat_current: AtomicBool::new(false),
+                speed: Mutex::new(1.0),
+                to_clear: Mutex::new(0),
+            }),
+            sound_count: Arc::new(AtomicUsize::new(0)),
+            detached: false,
+        };
+        (sink, queue_rx)
+    }
+
+    /// Builds a new `Sink` with signal sender.
+    #[inline]
+    pub fn new_idle_with_signal(signal_sender: Sender<Box<dyn Source<Item = f32> + Send>>) -> (Sink, queue::SourcesQueueOutput<f32>) {
+        let (queue_tx, queue_rx) = queue::queue_with_signal(true, signal_sender);
 
         let sink = Sink {
             queue_tx,
@@ -54,6 +86,7 @@ impl Sink {
                 pause: AtomicBool::new(false),
                 volume: Mutex::new(1.0),
                 stopped: AtomicBool::new(false),
+                repeat_current: AtomicBool::new(false),
                 speed: Mutex::new(1.0),
                 to_clear: Mutex::new(0),
             }),
@@ -73,7 +106,7 @@ impl Sink {
     {
         // Wait for queue to flush then resume stopped playback
         if self.controls.stopped.load(Ordering::SeqCst) {
-            if self.sound_count.load(Ordering::SeqCst) > 0 {
+          if self.sound_count.load(Ordering::SeqCst) > 0 {
                 self.sleep_until_end();
             }
             self.controls.stopped.store(false, Ordering::SeqCst);
@@ -84,6 +117,7 @@ impl Sink {
         let start_played = AtomicBool::new(false);
 
         let source = source
+            .repeatable()
             .speed(1.0)
             .pausable(false)
             .amplify(1.0)
@@ -96,7 +130,7 @@ impl Sink {
                 {
                     let mut to_clear = controls.to_clear.lock().unwrap();
                     if *to_clear > 0 {
-                        let _ = src.inner_mut().skip();
+                        src.inner_mut().skip();
                         *to_clear -= 1;
                     }
                 }
@@ -107,6 +141,11 @@ impl Sink {
                 amp.inner_mut()
                     .inner_mut()
                     .set_factor(*controls.speed.lock().unwrap());
+                amp.inner_mut()
+                    .inner_mut()
+                    .inner_mut()
+                    .set_repeat(controls.repeat_current.load(Ordering::SeqCst));
+
                 start_played.store(true, Ordering::SeqCst);
             })
             .convert_samples();
@@ -166,6 +205,20 @@ impl Sink {
     /// A paused sink can be resumed with `play()`.
     pub fn pause(&self) {
         self.controls.pause.store(true, Ordering::SeqCst);
+    }
+
+    /// Starts repeating current source
+    /// 
+    /// No effect if already set.
+    /// 
+    /// A set sink can be unset with `stop_repeating_one()`.
+    pub fn repeat_current(&self) {
+        self.controls.repeat_current.store(true, Ordering::SeqCst);
+    }
+
+    /// Stops repeating current source. 
+    pub fn stop_repeating_current(&self) {
+        self.controls.repeat_current.store(false, Ordering::SeqCst);
     }
 
     /// Gets if a sink is paused

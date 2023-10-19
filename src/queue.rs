@@ -35,11 +35,32 @@ where
     let output = SourcesQueueOutput {
         current: Box::new(Empty::<S>::new()) as Box<_>,
         signal_after_end: None,
+        signal_passed: None,
         input: input.clone(),
     };
 
     (input, output)
 }
+
+pub fn queue_with_signal<S>(keep_alive_if_empty: bool, signal_sender: Sender<Box<dyn Source<Item = S> + Send>>) -> (Arc<SourcesQueueInput<S>>, SourcesQueueOutput<S>)
+where
+    S: Sample + Send + 'static,
+{
+    let input = Arc::new(SourcesQueueInput {
+        next_sounds: Mutex::new(Vec::new()),
+        keep_alive_if_empty: AtomicBool::new(keep_alive_if_empty),
+    });
+
+    let output = SourcesQueueOutput {
+        current: Box::new(Empty::<S>::new()) as Box<_>,
+        signal_after_end: None,
+        signal_passed: Some(signal_sender),
+        input: input.clone(),
+    };
+
+    (input, output)
+}
+
 
 // TODO: consider reimplementing this with `from_factory`
 
@@ -108,6 +129,9 @@ pub struct SourcesQueueOutput<S> {
 
     // Signal this sender before picking from `next`.
     signal_after_end: Option<Sender<()>>,
+
+    // Singal this static sender after `current` was replaced.
+    signal_passed: Option<Sender<Box<dyn Source<Item = S> + Send>>>,
 
     // The next sounds.
     input: Arc<SourcesQueueInput<S>>,
@@ -212,23 +236,27 @@ where
             let _ = signal_after_end.send(());
         }
 
-        let (next, signal_after_end) = {
+        let (next, signal_after_end) = {              
             let mut next = self.input.next_sounds.lock().unwrap();
 
             if next.len() == 0 {
                 let silence = Box::new(Zero::<S>::new_samples(1, 44100, THRESHOLD)) as Box<_>;
                 if self.input.keep_alive_if_empty.load(Ordering::Acquire) {
                     // Play a short silence in order to avoid spinlocking.
-                    (silence, None)
-                } else {
-                    return Err(());
+                    self.current = silence;
+
+                    return Ok(());
                 }
-            } else {
-                next.remove(0)
+                return Err(());
             }
+
+            next.remove(0)
         };
 
-        self.current = next;
+        let previous = std::mem::replace(&mut self.current, next);
+        if let Some(ref signal_passed) = self.signal_passed {
+            let _ = signal_passed.send(previous);
+        }
         self.signal_after_end = signal_after_end;
         Ok(())
     }
